@@ -34,7 +34,7 @@ let lex_comments ?bound ?start ?finish file =
     | Some bound, None -> bound.loc_start
     | None, None -> 
         { pos_fname = fname;
-   	  pos_lnum = 0;
+   	  pos_lnum = 1;
    	  pos_bol = 0;
    	  pos_cnum = 0; }
   in
@@ -97,8 +97,9 @@ let parse_extra_comments mk_com stop coms =
   let rec loop acc coms =
     match coms with
       [] -> List.rev acc
-    | Special(str, pos) :: rest -> 
+    | Special(str, loc) :: rest -> 
       let lexbuf = Lexing.from_string str in
+      Info_lexer.update_loc lexbuf loc;
       let info = Info_parser.info Info_lexer.main lexbuf in
       let com = mk_com info in
         loop (com :: acc) rest
@@ -108,45 +109,61 @@ let parse_extra_comments mk_com stop coms =
   in
     loop [] coms
 
+let compare_locs x y = 
+  let (|||) i j = if i <> 0 then i else j in
+  let sl = compare x.loc_start.pos_lnum y.loc_start.pos_lnum in
+  let sc = compare x.loc_start.pos_cnum y.loc_start.pos_cnum in
+  let el = compare x.loc_end.pos_lnum y.loc_end.pos_lnum in
+  let ec = compare x.loc_end.pos_cnum y.loc_end.pos_cnum in
+    sl ||| sc ||| el ||| ec
+
+let sort_by_loc loc l =
+  let il = List.mapi (fun idx x -> (x, idx)) l in
+    List.stable_sort (fun (x, _) (y, _) -> compare_locs (loc x) (loc y)) il
+
+let sort_by_idx l = 
+  let il = List.stable_sort (fun (_, i) (_, j) -> compare i j) l in
+    List.map fst il
+
 let parse_type_declaration file after typ =
   match typ.ptype_kind with 
     Ptype_abstract -> Dtype_abstract, after
   | Ptype_variant cstrs ->
       let rec loop acc cstrs =
         match cstrs with
-          [] -> Dtype_variant (List.rev acc), after
-        | (name, _, _, _) :: [] ->
+          [] -> Dtype_variant (sort_by_idx acc), after
+        | ((name, _, _, _), idx) :: [] ->
             let com, after = just_after_comment after in
             let info = get_info com in
-            let cstrs = List.rev ((name.txt, info) :: acc) in
+            let cstrs = sort_by_idx (((name.txt, info), idx) :: acc) in
               Dtype_variant cstrs, after
-        | (name, _, _, loc) :: (((_, _, _, next) :: _) as rest) ->
+        | ((name, _, _, loc), idx) :: ((((_, _, _, next), _) :: _) as rest) ->
             let coms = lex_comments ~start:loc ~finish:next file in
             let com, _ = just_after_comment coms in
             let info = get_info com in
-              loop ((name.txt, info) :: acc) rest
+              loop (((name.txt, info), idx) :: acc) rest
       in
-        loop [] cstrs
+        loop [] (sort_by_loc (fun (_,_,_,loc) -> loc) cstrs)
   | Ptype_record fields ->
       let rec loop acc fields =
         match fields with
-          [] -> Dtype_record (List.rev acc), after
-        | (name, _, _, loc) :: ([] as rest) ->
+          [] -> Dtype_record (sort_by_idx acc), after
+        | ((name, _, _, loc), idx) :: ([] as rest) ->
             let coms = 
               lex_comments ~bound:typ.ptype_loc ~start:loc file
             in
             let com, _ = just_after_comment coms in
             let info = get_info com in
-              loop ((name.txt, info) :: acc) rest
-        | (name, _, _, loc) :: (((_, _, _, next) :: _) as rest) ->
+              loop (((name.txt, info), idx) :: acc) rest
+        | ((name, _, _, loc), idx) :: ((((_, _, _, next), _) :: _) as rest) ->
             let coms = 
               lex_comments ~bound:typ.ptype_loc ~start:loc ~finish:next file 
             in
             let com, _ = just_after_comment coms in
             let info = get_info com in
-              loop ((name.txt, info) :: acc) rest
+              loop (((name.txt, info), idx) :: acc) rest
       in
-        loop [] fields
+        loop [] (sort_by_loc (fun (_,_,_,loc) -> loc) fields)
 
 
 let rec parse_class_type_field file before after field =
@@ -220,8 +237,8 @@ and parse_class_type file cty =
         match fields with
           [] -> 
             let extra = parse_extra_comments mk_com stop before in
-            Dcty_signature (List.rev_append acc extra)
-        | field :: ([] as rest) ->
+              Dcty_signature ((sort_by_idx acc) @ extra)
+        | (field, idx) :: ([] as rest) ->
             let after = 
               lex_comments ~bound:cty.pcty_loc ~start:field.pctf_loc file
             in
@@ -229,9 +246,10 @@ and parse_class_type file cty =
               parse_class_type_field file before after field 
             in
             let extra = parse_extra_comments mk_com stop before in
-            let acc = List.rev_append extra acc in
-              loop after (field :: acc) rest
-        | field :: ((next :: _) as rest) ->
+            let extra = List.map (fun x -> (x, idx)) extra in
+            let acc = extra @ (field, idx) :: acc in
+              loop after acc rest
+        | (field, idx) :: (((next, _) :: _) as rest) ->
             let after = 
               lex_comments 
                 ~bound:cty.pcty_loc 
@@ -243,10 +261,11 @@ and parse_class_type file cty =
               parse_class_type_field file before after field 
             in
             let extra = parse_extra_comments mk_com stop before in
-            let acc = List.rev_append extra acc in
-              loop after (field :: acc) rest
+            let extra = List.map (fun x -> (x, idx)) extra in
+            let acc = extra @ (field, idx) :: acc in
+              loop after acc rest
       in
-        loop before [] clsig.pcsig_fields
+        loop before [] (sort_by_loc (fun f -> f.pctf_loc) clsig.pcsig_fields)
 
 let rec parse_class_field file before field =
   match field.pcf_desc with
@@ -297,8 +316,8 @@ and parse_class_expr file cl =
         match fields with
           [] -> 
             let extra = parse_extra_comments mk_com stop before in
-            Dcl_structure (List.rev_append acc extra)
-        | field :: ([] as rest) ->
+            Dcl_structure ((sort_by_idx acc) @ extra)
+        | (field, idx) :: ([] as rest) ->
             let after = 
               lex_comments ~bound:cl.pcl_loc ~start:field.pcf_loc file
             in
@@ -306,9 +325,10 @@ and parse_class_expr file cl =
               parse_class_field file before field 
             in
             let extra = parse_extra_comments mk_com stop before in
-            let acc = List.rev_append extra acc in
-              loop after (field :: acc) rest
-        | field :: ((next :: _) as rest) ->
+            let extra = List.map (fun x -> (x, idx)) extra in
+            let acc = extra @ (field, idx) :: acc in
+              loop after acc rest
+        | (field, idx) :: (((next, _) :: _) as rest) ->
             let after = 
               lex_comments 
                 ~bound:cl.pcl_loc 
@@ -320,10 +340,11 @@ and parse_class_expr file cl =
               parse_class_field file before field 
             in
             let extra = parse_extra_comments mk_com stop before in
-            let acc = List.rev_append extra acc in
-              loop after (field :: acc) rest
+            let extra = List.map (fun x -> (x, idx)) extra in
+            let acc = extra @ (field, idx) :: acc in
+              loop after acc rest
       in
-        loop before [] cstr.pcstr_fields
+        loop before [] (sort_by_loc (fun f -> f.pcf_loc) cstr.pcstr_fields)
 
 
 let simplify_signature sg = 
@@ -587,8 +608,8 @@ and parse_module_type file mty =
         match items with
           [] -> 
             let extra = parse_extra_comments mk_com stop before in
-            Dmty_signature (List.rev_append acc extra)
-        | item :: ([] as rest) ->
+            Dmty_signature ((sort_by_idx acc) @ extra)
+        | (item, idx) :: ([] as rest) ->
             let after = 
               lex_comments ~bound:mty.pmty_loc ~start:item.psig_loc file
             in
@@ -596,9 +617,10 @@ and parse_module_type file mty =
               parse_signature_item file before after item 
             in
             let extra = parse_extra_comments mk_com stop before in
-            let acc = List.rev_append extra acc in
-              loop after (item :: acc) rest
-        | item :: ((next :: _) as rest) ->
+            let extra = List.map (fun x -> (x, idx)) extra in
+            let acc = extra @ (item, idx) :: acc in
+              loop after acc rest
+        | (item, idx) :: (((next, _) :: _) as rest) ->
             let after = 
               lex_comments 
                 ~bound:mty.pmty_loc 
@@ -610,10 +632,11 @@ and parse_module_type file mty =
               parse_signature_item file before after item 
             in
             let extra = parse_extra_comments mk_com stop before in
-            let acc = List.rev_append extra acc in
-              loop after (item :: acc) rest
+            let extra = List.map (fun x -> (x, idx)) extra in
+            let acc = extra @ (item, idx) :: acc in
+              loop after acc rest
       in
-        loop before [] items
+        loop before [] (sort_by_loc (fun i -> i.psig_loc) items)
 
 and parse_structure_item file before after item =
   match item.pstr_desc with
@@ -755,8 +778,8 @@ and parse_module_expr file mexpr =
         match items with
           [] -> 
             let extra = parse_extra_comments mk_com stop before in
-            Dmod_structure (List.rev_append acc extra)
-        | item :: ([] as rest) ->
+            Dmod_structure ((sort_by_idx acc) @ extra)
+        | (item, idx) :: ([] as rest) ->
             let after = 
               lex_comments ~bound:mexpr.pmod_loc ~start:item.pstr_loc file
             in
@@ -764,9 +787,10 @@ and parse_module_expr file mexpr =
               parse_structure_item file before after item 
             in
             let extra = parse_extra_comments mk_com stop before in
-            let acc = List.rev_append extra acc in
-              loop after (item :: acc) rest
-        | item :: ((next :: _) as rest) ->
+            let extra = List.map (fun x -> (x, idx)) extra in
+            let acc = extra @ (item, idx) :: acc in
+              loop after acc rest
+        | (item, idx) :: (((next, _) :: _) as rest) ->
             let after = 
               lex_comments 
                 ~bound:mexpr.pmod_loc 
@@ -778,10 +802,11 @@ and parse_module_expr file mexpr =
               parse_structure_item file before after item 
             in
             let extra = parse_extra_comments mk_com stop before in
-            let acc = List.rev_append extra acc in
-              loop after (item :: acc) rest
+            let extra = List.map (fun x -> (x, idx)) extra in
+            let acc = extra @ (item, idx) :: acc in
+              loop after acc rest
       in
-        loop before [] items
+        loop before [] (sort_by_loc (fun i -> i.pstr_loc) items)
 
 let parse_interface file sg = 
   let items = simplify_signature sg in
@@ -809,8 +834,8 @@ let parse_interface file sg =
     match items with
       [] -> 
         let extra = parse_extra_comments mk_com stop before in
-          List.rev_append acc extra
-    | item :: ([] as rest) ->
+          (sort_by_idx acc) @ extra
+    | (item, idx) :: ([] as rest) ->
       let after = 
         lex_comments ~start:item.psig_loc file
       in
@@ -818,9 +843,10 @@ let parse_interface file sg =
         parse_signature_item file before after item 
       in
       let extra = parse_extra_comments mk_com stop before in
-      let acc = List.rev_append extra acc in
-        loop after (item :: acc) rest
-    | item :: ((next :: _) as rest) ->
+      let extra = List.map (fun x -> (x, idx)) extra in
+      let acc = extra @ (item, idx) :: acc in
+        loop after acc rest
+    | (item, idx) :: (((next, _) :: _) as rest) ->
       let after = 
         lex_comments ~start:item.psig_loc ~finish:next.psig_loc file
       in
@@ -828,10 +854,11 @@ let parse_interface file sg =
         parse_signature_item file before after item 
       in
       let extra = parse_extra_comments mk_com stop before in
-      let acc = List.rev_append extra acc in
-        loop after (item :: acc) rest
+      let extra = List.map (fun x -> (x, idx)) extra in
+      let acc = extra @ (item, idx) :: acc in
+        loop after acc rest
   in
-  let items = loop before [] items in
+  let items = loop before [] (sort_by_loc (fun i -> i.psig_loc) items) in
     { dintf_items = items;
       dintf_info = info; }
 
@@ -854,8 +881,8 @@ let parse_implementation file str =
     match items with
       [] -> 
         let extra = parse_extra_comments mk_com stop before in
-          List.rev_append acc extra
-    | item :: ([] as rest) ->
+          (sort_by_idx acc) @ extra
+    | (item, idx) :: ([] as rest) ->
         let after = 
           lex_comments ~start:item.pstr_loc file
         in
@@ -863,9 +890,10 @@ let parse_implementation file str =
           parse_structure_item file before after item 
         in
         let extra = parse_extra_comments mk_com stop before in
-        let acc = List.rev_append extra acc in
-          loop after (item :: acc) rest
-    | item :: ((next :: _) as rest) ->
+        let extra = List.map (fun x -> (x, idx)) extra in
+        let acc = extra @ (item, idx) :: acc in
+          loop after acc rest
+    | (item, idx) :: (((next, _) :: _) as rest) ->
         let after = 
           lex_comments 
             ~start:item.pstr_loc 
@@ -876,10 +904,11 @@ let parse_implementation file str =
           parse_structure_item file before after item 
         in
         let extra = parse_extra_comments mk_com stop before in
-        let acc = List.rev_append extra acc in
-          loop after (item :: acc) rest
+        let extra = List.map (fun x -> (x, idx)) extra in
+        let acc = extra @ (item, idx) :: acc in
+          loop after acc rest
   in
-  let items = loop before [] items in
+  let items = loop before [] (sort_by_loc (fun i -> i.pstr_loc) items) in
     { dimpl_items = items;
       dimpl_info = info; }
  
